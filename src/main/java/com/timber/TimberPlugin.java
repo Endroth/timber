@@ -18,6 +18,7 @@ import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockBurnEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.block.LeavesDecayEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.world.ChunkUnloadEvent;
 import org.bukkit.event.world.StructureGrowEvent;
@@ -29,8 +30,10 @@ import org.bukkit.plugin.java.JavaPlugin;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -50,6 +53,7 @@ public class TimberPlugin extends JavaPlugin implements Listener {
     private boolean requireAxe;
     private boolean sneakDisables;
     private boolean wearTool;
+    private boolean removeLeaves;
 
     @Override
     public void onEnable() {
@@ -58,6 +62,7 @@ public class TimberPlugin extends JavaPlugin implements Listener {
         requireAxe = getConfig().getBoolean("exigir-machado", true);
         sneakDisables = getConfig().getBoolean("agachar-desativa", true);
         wearTool = getConfig().getBoolean("gastar-durabilidade", true);
+        removeLeaves = getConfig().getBoolean("folhas-somem-na-hora", true);
 
         store = new PlacedStore(new NamespacedKey(this, "placed"));
         Bukkit.getPluginManager().registerEvents(this, this);
@@ -128,7 +133,7 @@ public class TimberPlugin extends JavaPlugin implements Listener {
         if (tree.isEmpty()) return;
         if (!hasNaturalLeaves(origin, tree)) return; // nao parece uma arvore
 
-        chop(p, tool, tree);
+        chop(p, tool, origin, tree);
     }
 
     /** Acha os troncos ligados ao tronco quebrado, da mesma especie e nao colocados por jogador. */
@@ -192,7 +197,8 @@ public class TimberPlugin extends JavaPlugin implements Listener {
         return false;
     }
 
-    private void chop(Player p, ItemStack tool, List<Block> tree) {
+    private void chop(Player p, ItemStack tool, Block origin, List<Block> tree) {
+        List<Block> removed = new ArrayList<>();
         busy.add(p.getUniqueId());
         try {
             for (Block log : tree) {
@@ -210,12 +216,90 @@ public class TimberPlugin extends JavaPlugin implements Listener {
                 } else {
                     log.setType(Material.AIR);
                 }
+                removed.add(log);
                 if (wearTool) damage(tool);
             }
         } finally {
             busy.remove(p.getUniqueId());
         }
         p.getInventory().setItemInMainHand(tool);
+
+        if (removeLeaves) clearLeaves(origin, removed);
+    }
+
+    private static final int DECAY_RANGE = 6;     // folha a ate 6 passos de um tronco fica viva
+    private static final int SUPPORT_RANGE = 12;  // regiao analisada para achar outras arvores
+
+    /**
+     * Faz as folhas que iriam apodrecer sumirem na hora, como o decaimento normal
+     * (mesmos drops de mudas e gravetos). Folhas que ainda estao ligadas a outra
+     * arvore, e folhas colocadas por jogadores, continuam no lugar.
+     */
+    private void clearLeaves(Block origin, List<Block> removed) {
+        // o tronco quebrado pelo jogador ainda existe neste momento, entao conta como removido
+        Set<Block> gone = new HashSet<>(removed);
+        gone.add(origin);
+
+        // 1) folhas ao redor dos troncos cortados (depth = passos desde um tronco cortado)
+        Map<Block, Integer> depth = new HashMap<>();
+        Deque<Block> queue = new ArrayDeque<>();
+        for (Block log : gone) {
+            for (BlockFace f : FACES) {
+                Block n = log.getRelative(f);
+                if (Tag.LEAVES.isTagged(n.getType()) && !depth.containsKey(n)) {
+                    depth.put(n, 1);
+                    queue.add(n);
+                }
+            }
+        }
+        while (!queue.isEmpty()) {
+            Block cur = queue.poll();
+            int d = depth.get(cur);
+            if (d >= SUPPORT_RANGE) continue;
+            for (BlockFace f : FACES) {
+                Block n = cur.getRelative(f);
+                if (depth.containsKey(n) || !Tag.LEAVES.isTagged(n.getType())) continue;
+                depth.put(n, d + 1);
+                queue.add(n);
+            }
+        }
+
+        // 2) quais folhas ainda tem um tronco por perto (regra do jogo: ate 6 passos)
+        Map<Block, Integer> dist = new HashMap<>();
+        for (Block leaf : depth.keySet()) {
+            for (BlockFace f : FACES) {
+                Block n = leaf.getRelative(f);
+                if (Tag.LOGS.isTagged(n.getType()) && !gone.contains(n)) {
+                    dist.put(leaf, 1);
+                    queue.add(leaf);
+                    break;
+                }
+            }
+        }
+        while (!queue.isEmpty()) {
+            Block cur = queue.poll();
+            int d = dist.get(cur);
+            if (d >= DECAY_RANGE) continue;
+            for (BlockFace f : FACES) {
+                Block n = cur.getRelative(f);
+                if (depth.containsKey(n) && !dist.containsKey(n)) {
+                    dist.put(n, d + 1);
+                    queue.add(n);
+                }
+            }
+        }
+
+        // 3) remove as folhas naturais que ficaram sem tronco
+        for (Map.Entry<Block, Integer> en : depth.entrySet()) {
+            if (en.getValue() > DECAY_RANGE) continue;
+            Block leaf = en.getKey();
+            if (dist.containsKey(leaf)) continue;
+            if (!(leaf.getBlockData() instanceof Leaves data) || data.isPersistent()) continue;
+
+            LeavesDecayEvent ev = new LeavesDecayEvent(leaf);
+            Bukkit.getPluginManager().callEvent(ev);
+            if (!ev.isCancelled()) leaf.breakNaturally();
+        }
     }
 
     private boolean nearlyBroken(ItemStack tool) {
