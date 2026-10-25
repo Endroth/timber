@@ -1,0 +1,11 @@
+# Maximo de troncos quebrados de uma vez
+max-logs: 500
+
+# Precisa estar com um machado na mao
+exigir-machado: true
+
+# Se true, agachar (shift) quebra so um tronco
+agachar-desativa: true
+
+# Gasta 1 de durabilidade do machado por tronco extra
+gastar-durabilidade: true

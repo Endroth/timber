@@ -1,0 +1,9 @@
+name: TimberArvore
+version: 1.0
+main: com.timber.TimberPlugin
+api-version: "26.1"
+description: Quebra a arvore inteira, somente arvores naturais
+permissions:
+  timber.use:
+    description: Permite usar o corte de arvore inteira
+    default: true
